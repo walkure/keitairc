@@ -38,7 +38,7 @@ my ($version) = $rcsid =~ m#,v ([0-9.]+)#;
 # yukinon version
 $version .= "+y9";
 $version .= "+t12";
-$version .= '+w1';
+$version .= '+w2';
 
 use strict;
 use POE;
@@ -53,7 +53,7 @@ use constant true => 1;
 use constant false => 0;
 use constant cookie_ttl => 86400*3; # 3 days
 
-require_charset_converter();undef &require_charset_converter;
+use Encode;
 
 my $config = AppConfig->new(
 	{
@@ -67,7 +67,7 @@ my $config = AppConfig->new(
 	   au_subscriber_id authorized_useragent
 	   use_cookie web_port web_title
 	   web_lines web_common_lines
-	   web_root accesskey_attrs
+	   web_root accesskey_attrs server_charset
 	   web_username web_password show_newmsgonly
 	   web_input_encoding uri_prefix buf_lines
 	   net_sep proxy_root)
@@ -81,6 +81,9 @@ my $docroot = '/';
 if (defined $config->web_root) {
     $docroot = $config->web_root;
 }
+
+my $server_charset = defined $config->server_charset ? $config->server_charset : 'jis';
+my $web_charset = defined $config->web_input_encoding ? $config->web_input_encoding : 'sjis';
 
 my $proxyroot = $config->proxy_root;
 
@@ -223,7 +226,7 @@ sub on_irc_join{
 
     unless ($who eq $config->irc_nick) {
 		my $msg = sprintf('+ %s to %s', $who, &compact_channel_name($channel));
-		$msg = Jcode->new($msg, 'jis')->euc;
+		$msg = Encode::decode($server_charset,$msg);
 		&add_message($console, undef, $msg);
     }
 }
@@ -250,7 +253,7 @@ sub on_irc_part{
 		&remove_users_list($channel, $who);
 
 		my $msg = sprintf('- %s from %s', $who, &compact_channel_name($channel));
-		$msg = Jcode->new($msg, 'jis')->euc;
+		$msg = Encode::decode($server_charset,$msg);
 		&add_message($console, undef, $msg);
     }
 }
@@ -265,7 +268,7 @@ sub on_irc_quit{
 		&remove_users_list($channel, $who);
     }
 
-    $msg = Jcode->new($msg, 'jis')->euc;
+	$msg = Encode::decode($server_charset,$msg);
     &add_message($console, undef, "! $who ($msg)");
 }
 
@@ -275,7 +278,7 @@ sub on_irc_public{
     my ($kernel, $who, $channel, $msg) = @_[KERNEL, ARG0 .. ARG2];
     $who =~ s/!.*//;
     $channel = $channel->[0];
-    $msg = Jcode->new($msg, 'jis')->euc;
+	$msg = Encode::decode($server_charset,$msg);
     &add_message($channel, "$who>", $msg);
 }
 
@@ -285,7 +288,7 @@ sub on_irc_notice{
     my ($kernel, $who, $channel, $msg) = @_[KERNEL, ARG0 .. ARG2];
     $who =~ s/!.*//;
     $channel = $channel->[0];
-    $msg = Jcode->new($msg, 'jis')->euc;
+	$msg = Encode::decode($server_charset,$msg);
     &add_message($channel, "$who)", $msg);
 }
 
@@ -294,7 +297,7 @@ sub on_irc_notice{
 sub on_irc_topic{
     my ($kernel, $who, $channel, $topic) = @_[KERNEL, ARG0 .. ARG2];
     $who =~ s/!.*//;
-    $topic = Jcode->new($topic, 'jis')->euc;
+	$topic = Encode::decode($server_charset,$topic);
     &add_message($channel, undef, "$who set topic: $topic");
     add_topic($channel, $topic);
 }
@@ -311,7 +314,7 @@ sub on_irc_ctcp_action{
     my ($kernel, $who, $channel, $msg) = @_[KERNEL, ARG0 .. ARG2];
     $who =~ s/!.*//;
     $channel = $channel->[0];
-    $msg = sprintf('* %s %s', $who, Jcode->new($msg, 'jis')->euc);
+    $msg = sprintf('* %s %s', $who, Encode::decode($server_charset,$msg));
     &add_message($channel, '', $msg);
 }
 
@@ -339,7 +342,7 @@ sub on_irc_msg{
     my ($kernel, $who, $channel, $msg) = @_[KERNEL, ARG0 .. ARG2];
     $who =~ s/!.*//;
     $channel = $channel->[0];
-    $msg = Jcode->new($msg, 'jis')->euc;
+    $msg = Encode::decode($server_charset,$msg);
     &add_message($channel, "$who>", $msg);
 }
 
@@ -371,7 +374,7 @@ sub on_irc_rpl_endofnames{
 sub on_irc_disconnected{
     my ($kernel, $server) = @_[KERNEL, ARG1];
 
-    my $who = Jcode->new($config->web_title, 'jis')->euc;
+    my $who = Encode::decode($server_charset,$config->web_title);
 
     for my $channel (sort keys %channel_name) {
 		&add_message($channel, undef, "Disconnected Server : $server");
@@ -493,12 +496,12 @@ sub index_page{
 			    $accesskey,
 			    $docroot,
 			    &channel_to_uri($channel),
-			    Jcode->new(&compact_channel_name($channel), 'jis')->euc);
+			    Encode::decode($server_charset,&compact_channel_name($channel)));
 	} else {
 	    $buf .= sprintf('  <a href="%s%s">%s</a>',
 			    $docroot,
 			    &channel_to_uri($channel),
-			    Jcode->new(&compact_channel_name($channel), 'jis')->euc);
+			    Encode::decode($server_charset,&compact_channel_name($channel)));
 	}
 
 	$accesskey++;
@@ -549,7 +552,7 @@ sub index_recent {
 	    $buf .= sprintf('href="%s%s">%s',
 			    $docroot,
 			    &channel_to_uri($channel),
-			    Jcode->new(&compact_channel_name($channel), 'jis')->euc);
+			    Encode::decode($server_charset,&compact_channel_name($channel)));
 	    if ($accesskey < 10) {
 			$buf .= sprintf(' [%1d]', $accesskey)
 	    }
@@ -589,9 +592,9 @@ sub channel_topic {
     $buf .= sprintf('<a href="%s%s">%s</a><br>',
 		    $docroot,
 		    &channel_to_uri($channel),
-		    Jcode->new(&compact_channel_name($channel), 'jis')->euc);
+		    Encode::decode($server_charset,&compact_channel_name($channel)));
     $buf .= '<font size="-1">' if ($mobile);
-    $buf .= &escape(Jcode->new($topic{$channel}, 'jis')->euc);
+    $buf .= &escape(Encode::decode($server_charset,$topic{$channel}));
     $buf .= '<br>';
 
     for my $user (sort split(' ', $users_list{$channel})) {
@@ -631,7 +634,7 @@ sub index_users{
 		$buf .= sprintf('<a href="%s%s">%s</a><br>',
 				$docroot,
 				&channel_to_uri($channel),
-				Jcode->new(&compact_channel_name($channel), 'jis')->euc);
+				Encode::decode($server_charset,&compact_channel_name($channel)));
 		$buf .= '<font size="-1">' if ($mobile);
 
 		for my $user (sort split(' ', $users_list{$channel})) {
@@ -655,7 +658,7 @@ sub recent_all_messages{
 	my $link = sprintf('<a href="%s%s">%s</a>',
 			   $docroot,
 			   &channel_to_uri($channel),
-			   Jcode->new(compact_channel_name($channel), 'jis')->euc);
+			   Encode::decode($server_charset,compact_channel_name($channel)));
 		# for my $message ( split("\n", $channel_buffer{$channel}) ) {
 		for my $message ( split("\n", $channel_recent{$channel}) ) {
 		    push (@tmp, &line_render($message) . " ($link)<br>\n" );
@@ -882,21 +885,22 @@ sub on_web_request{
 		if (length($message)) {
 		    my $channel = &uri_to_channel($uri);
 		    if ($message =~ s|^/||) {
-			my ($params, $trailing) = split(/ :/, $message, 2);
-			my @postcmd = split(/ /, $params);
-			push @postcmd, $trailing if defined $trailing;
+				my ($params, $trailing) = split(/ :/, $message, 2);
+				my @postcmd = split(/ /, $params);
+				push @postcmd, $trailing if defined $trailing;
 
-			$poe_kernel->post('keitairc', map {
-			    Jcode->new($_, $config->web_input_encoding)->jis
-			} @postcmd);
+				$poe_kernel->post('keitairc', map {
+					Encode::from_to($_,$web_charset,$server_charset)
+					} @postcmd);
 		    } else {
-			$poe_kernel->post('keitairc',
+				my $d_message = Encode::decode($web_charset,$message);
+				my $d_channel = Encode::decode($web_charset,$channel);
+				$poe_kernel->post('keitairc',
 					  'privmsg',
-					  Jcode->new($channel, $config->web_input_encoding)->jis,
-					  Jcode->new($message, $config->web_input_encoding)->jis);
-			&add_message($channel, $config->irc_nick . '>',
-				     Jcode->new($message, $config->web_input_encoding)->euc);
-			$message_added = true;
+					  Encode::encode($server_charset,$d_channel),
+					  Encode::encode($server_charset,$d_message));
+				&add_message($channel, $config->irc_nick . '>',$d_message);
+				$message_added = true;
 		    }
 		}
     }
@@ -937,10 +941,9 @@ sub on_web_request{
 
 		my $channel = uri_to_channel($uri);
 
-		$content .= '<title>' . $config->web_title . ": " .
-		    Jcode->new($channel, 'jis')->euc . "</title>";
-		$content .= '</head>';
-		$content .= '<body>';
+		$content .= '<title>' . $config->web_title . ': ' .
+		    Encode::decode($server_charset,$channel) . '</title>';
+		$content .= '</head><body>';
 
 		if ($option{topic}) {
 		    if (defined($channel_name{$channel})) {
@@ -1081,27 +1084,33 @@ sub on_web_request{
 					       $config->web_password, $expiration));
     }
 
-    $response->push_header('Content-type', 'text/html; charset=Shift_JIS');
+	if($web_charset eq 'sjis'){
+	    $response->push_header('Content-type', 'text/html; charset=Shift_JIS');
+	}elsif($web_charset eq 'utf8'){
+	    $response->push_header('Content-type', 'text/html; charset=UTF-8');
+	}
+
     if (defined $config->accesskey_attrs) {
 		my @accesskeys = split /,/, $config->accesskey_attrs;
 		$content =~ s/(<(?:a|input) +)accesskey(=[^ >]+)/
 		    "$1" . join(' ', map { "$_$2" } @accesskeys)/eg;
     }
-    $response->content(Jcode->new($content, 'euc')->sjis);
+    $response->content(Encode::encode($web_charset,$content));
     $heap->{client}->put($response);
     $kernel->yield('shutdown');
 }
 
 sub uri_to_channel {
     my ($str) = shift;
-
-    return Jcode->new(uri_unescape($str), 'utf8')->jis;
+	my $ure = uri_unescape($str);
+    Encode::from_to($ure,'utf8',$server_charset);
+	return $ure;
 }
 
 sub channel_to_uri {
     my ($str) = shift;
-
-    $str = uri_escape(Jcode->new($str, 'jis')->utf8);
+	Encode::from_to($str,$server_charset,'utf8');
+    return uri_escape($str);
 }
 
 sub unification_channel_name {
@@ -1161,62 +1170,6 @@ sub rename_users_list {
     }
 
     $users_list{$channel} = join(" ", @org);
-}
-
-
-sub require_charset_converter {
-    if (eval('use Unicode::Japanese;')) {
-	eval <<'END_OF_JCODE_COMPAT';
-	# Jcode compat
-	package Jcode;
-	use Unicode::Japanese;
-	our $AUTOLOAD;
-
-	sub new {
-	    my ($class, $str, $input_code) = @_;
-
-	    $input_code = "auto" if !defined $input_code;
-	    my $this = {
-			unijp => Unicode::Japanese->new(),
-	    };
-	    bless $this, $class;
-
-	    if ($input_code !~ /,/) {
-			$this->set($str, $input_code);
-	    } else {
-			my @encodings = split(/\s*,\s*/, $input_code);
-			my $auto_charset = $this->getcode($str);
-			# getcodeで検出された文字コードでencodingsに指定されているものがあれば採用。
-			# 無ければencodingsの一番最初を採用する。 (UTF-8をSJISと認識したりするため。)
-			my $use_encoding = ((map {$auto_charset eq $_ ? $_ : ()} @encodings), @encodings)[0];
-			$this->set($str, $use_encoding);
-	    }
-
-	    return $this;
-	}
-
-	sub AUTOLOAD {
-	    my ($this, @args) = @_;
-
-	    if ($AUTOLOAD =~ /::DESTROY$/) {
-			# DESTROYは伝達させない。
-			return;
-	    }
-
-	    (my $method = $AUTOLOAD) =~ s/.+?:://g;
-
-	    # define method
-	    eval "sub $method { shift->{unijp}->$method(\@_); }";
-
-	    no strict "refs";
-	    goto &$AUTOLOAD;
-	}
-END_OF_JCODE_COMPAT
-    } else {
-		if (eval('use Jcode;')) {
-		    die "Couldn't load Unicode::Japanese or Jcode!";
-		}
-    }
 }
 
 __END__

@@ -38,6 +38,7 @@ my ($version) = $rcsid =~ m#,v ([0-9.]+)#;
 # yukinon version
 $version .= "+y9";
 $version .= "+t12";
+$version .= '+w1';
 
 use strict;
 use POE;
@@ -69,7 +70,7 @@ my $config = AppConfig->new(
 	   web_root accesskey_attrs
 	   web_username web_password show_newmsgonly
 	   web_input_encoding uri_prefix buf_lines
-	   net_sep)
+	   net_sep proxy_root)
        );
 
 $config->file('/etc/keitairc') if ( -e '/etc/keitairc');
@@ -80,6 +81,8 @@ my $docroot = '/';
 if (defined $config->web_root) {
     $docroot = $config->web_root;
 }
+
+my $proxyroot = $config->proxy_root;
 
 my $buf_lines = $config->buf_lines;
 if (!defined $buf_lines) {
@@ -839,6 +842,17 @@ sub on_web_request{
     }
 
     my $uri = $request->uri;
+	if(defined $proxyroot){
+		#rewrite uri
+		if($uri =~ /^$proxyroot(\/?)(.*)/ ) {
+			$uri = $2;
+			$docroot = $1 ? './' : $proxyroot;
+		}
+	}else{
+		$docroot = '/';
+		$docroot = $config->web_root if (defined $config->web_root);
+	}
+	
     my $content = '';
     $content .= '<html><head>';
     #   $content .= '<meta http-equiv="Cache-Control" content="no-cache" />';

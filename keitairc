@@ -998,39 +998,39 @@ sub on_web_request{
 				    $content .= ' '. $goback . '('.$page.')'. $goforward . ' ';
 				}
 				$content .= qq(<a accesskey="8" href="$docroot">list[8]</a>);
-		    }
-		    $content .= sprintf(',<a href="%s%s,topic">topic</a>',
-					$docroot, $channel_uri);
-		    if ($show_newmsgonly == 2) {
+			}
+			$content .= sprintf(',<a href="%s%s,topic">topic</a>',
+				$docroot, $channel_uri);
+			if ($show_newmsgonly == 2) {
 				if ($page != 0) {
-				    $content .= sprintf(',<a accesskey="5" href="%s%s">latest[5]</a>',
+					$content .= sprintf(',<a accesskey="5" href="%s%s">latest[5]</a>',
 							$docroot, $channel_uri);
 				} elsif (!$show_recent) {
-				    $content .= sprintf(',<a accesskey="5" href="%s%s">refresh[5]</a>',
+					$content .= sprintf(',<a accesskey="5" href="%s%s">refresh[5]</a>',
 							$docroot, $channel_uri);
 				}
-		    }
-		    $content .= '<br></form>';
+			}
+			$content .= '<br></form>';
 			
-		    $content .= '<font size ="-1">' if ($mobile);
+			$content .= '<font size ="-1">' if ($mobile);
 			
-		    if (defined($channel_name{$channel})) {
+			if (defined($channel_name{$channel})) {
 				if (defined($channel_buffer{$channel}) && length($channel_buffer{$channel})) {
-				    $content .= '<a accesskey="9" href="#2"></a>';
-				    if ($show_recent) {
+					$content .= '<a accesskey="9" href="#2"></a>';
+					if ($show_recent) {
 						$content .= &channel_render($channel, true,$page);
 						$content .= sprintf('<a accesskey="5" href="%s%s">...more[5]</a>',
-								    $docroot, $channel_uri);
-				    } else {
+								$docroot, $channel_uri);
+					} else {
 						$content .= &channel_render($channel, false,$page);
-				    }
-				    $content .= '<a name="2"></a>';
+					}
+					$content .= '<a name="2"></a>';
 				} else {
-			    	$content .= 'no message here yet';
+					$content .= 'no message here yet';
 				}
-		    } else {
+			} else {
 				$content .= "no such channel";
-		    }
+			}
 
 		    if ($page == 0) {
 				# clear check flags

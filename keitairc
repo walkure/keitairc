@@ -1,0 +1,1206 @@
+#!/usr/bin/env perl
+# keitairc
+# $Id: keitairc,v 1.29 2004/09/16 13:44:10 morimoto Exp $
+#
+# Copyright (c) 2003 Jun Morimoto <morimoto@xantia.citroen.org>
+# This program is covered by the GNU General Public License 2
+#
+# Depends: libpoe-component-irc-perl,
+#   liburi-perl, libwww-perl, libappconfig-perl,
+#   libunicode-japanese-perl | libjcode-pm-perl
+
+# Copyright of Changes (c) 2003 IKARASHI Yoshinori <yoosee@init.org>
+#
+# $Id$
+#
+
+# Cookie Version
+# Copyright of Changes (c) 2003 HICHISATO Jun <hichisato@maid.st>
+#
+# $Id$
+#
+
+# V1.6 Based Merge Version (yoosee + Cookie + yukinon)
+# Copyright of Changes (c) 2003 HIIRAGI Yukio <yukio@tls.org>
+#
+# $Id$
+#
+
+# utf8 uri + use Unicode::Japanese
+# Copyright of Changes (c) 2004 Topia <topia@clovery.jp>
+#
+# $Id$
+#
+
+my $rcsid = q$Id: keitairc,v 1.29 2004/09/16 13:44:10 morimoto Exp $;
+my ($version) = $rcsid =~ m#,v ([0-9.]+)#;
+
+# yukinon version
+$version .= "+y9";
+$version .= "+t12";
+
+use strict;
+use POE;
+use POE::Component::Server::TCP;
+use POE::Filter::HTTPD;
+use POE::Component::IRC;
+use URI::Escape;
+use HTTP::Response;
+use AppConfig qw(:argcount);
+
+use constant true => 1;
+use constant false => 0;
+use constant cookie_ttl => 86400*3; # 3 days
+
+require_charset_converter();undef &require_charset_converter;
+
+my $config = AppConfig->new(
+	{
+	    CASE => 1,
+	    GLOBAL => {
+		ARGCOUNT => ARGCOUNT_ONE,
+	    }
+	   },
+	qw(irc_nick irc_username irc_desc
+	   irc_server irc_port irc_password
+	   au_subscriber_id authorized_useragent
+	   use_cookie web_port web_title
+	   web_lines web_common_lines
+	   web_root accesskey_attrs
+	   web_username web_password show_newmsgonly
+	   web_input_encoding uri_prefix buf_lines
+	   net_sep)
+       );
+
+$config->file('/etc/keitairc') if ( -e '/etc/keitairc');
+$config->file($ENV{'HOME'} . '/.keitairc');
+$config->args;
+
+my $docroot = '/';
+if (defined $config->web_root) {
+    $docroot = $config->web_root;
+}
+
+my $buf_lines = $config->buf_lines;
+if (!defined $buf_lines) {
+    $buf_lines = $config->web_lines;
+}
+
+my $show_newmsgonly = 0;
+my $always_show_lines = 0;
+if (defined $config->show_newmsgonly) {
+    $show_newmsgonly = $config->show_newmsgonly;
+    if ($show_newmsgonly =~ /^y|t/i) {
+	$show_newmsgonly = 1;
+    } elsif ($show_newmsgonly =~ /^always(?:,(\d+))?/i) {
+	$show_newmsgonly = 2;
+	if (defined $1) {
+	    $always_show_lines = $1;
+	}
+    } else {
+	$show_newmsgonly = 0;
+    }
+}
+
+my $uri_prefix = defined $config->uri_prefix ? $config->uri_prefix : '';
+
+my $authorized_useragent = $config->authorized_useragent;
+
+my $web_common_lines = defined $config->web_common_lines ?
+    $config->web_common_lines : 10;
+
+my $disconnected = 0;
+
+# join しているチャネルの名称を記録するハッシュ
+my %channel_name;
+
+# join しているチャネルの名称を記録するハッシュ
+my %topic;
+
+# チャネルの会話内容を記録するハッシュ
+my (%channel_buffer, %channel_recent);
+
+# 各チャネルの最新発言時刻
+my (%mtime);
+
+# unread lines
+my %unread;
+
+# chk
+my ($message_added);
+
+# チャンネルユーザーを記録するハッシュ
+my %users_list;
+my $users_list_work = '';
+
+# Console
+my $console = "*Console*";
+my $private = "*Private*";
+
+# irc component
+#POE::Component::IRC->new('keitairc');
+POE::Component::IRC->spawn(
+    alias => 'keitairc',
+    Nick => $config->irc_nick,
+    Username => $config->irc_username,
+    Ircname => $config->irc_desc,
+    Server => $config->irc_server,
+    Port => $config->irc_port,
+    Password => $config->irc_password
+);
+POE::Session->create(
+    inline_states => {
+	_start => \&on_irc_start,
+	irc_registered => \&on_irc_registered,
+	irc_join => \&on_irc_join,
+	irc_part => \&on_irc_part,
+	irc_public => \&on_irc_public,
+	irc_notice => \&on_irc_notice,
+	irc_topic => \&on_irc_topic,
+	irc_332 => \&on_irc_topicraw,
+	irc_ctcp_action => \&on_irc_ctcp_action,
+	irc_quit => \&on_irc_quit,
+	irc_nick => \&on_irc_nick,
+	irc_msg => \&on_irc_msg,
+	irc_353 => \&on_irc_rpl_namreply,
+	irc_366 => \&on_irc_rpl_endofnames,
+	irc_disconnected => \&on_irc_disconnected
+       },
+#    options => {
+#	trace => 1
+#       },
+   );
+
+# web server component
+POE::Component::Server::TCP->new(
+    Alias => 'keitairc',
+    Port => $config->web_port,
+    ClientFilter => 'POE::Filter::HTTPD',
+    ClientInput => \&on_web_request
+   );
+
+$poe_kernel->run();
+exit 0;
+
+##
+# DEBUGGER
+sub on_default{
+    my ($kernel, $session, $state, $realstate) = $_[KERNEL, SESSION, STATE, ARG0];
+
+    warn "unknown event: $realstate on " . $session . '/' . $state;
+}
+
+################################################################
+sub on_irc_start{
+    my $kernel = $_[KERNEL];
+
+    $channel_name{$console}++;
+    $channel_name{$private}++;
+
+    $kernel->post('keitairc' => 'register' => 'all');
+}
+
+################################################################
+sub on_irc_registered{
+    my $kernel = $_[KERNEL];
+
+    $disconnected = 0;
+    $kernel->post('keitairc' => 'connect' => {});
+}
+
+################################################################
+sub on_irc_join{
+    my ($kernel, $who, $channel) = @_[KERNEL, ARG0, ARG1];
+
+    $channel = unification_channel_name($channel);
+    $who =~ s/!.*//;
+    $channel_name{$channel}++;
+
+    &add_users_list($channel, $who);
+
+    unless ($who eq $config->irc_nick) {
+	my $msg = sprintf('+ %s to %s', $who, &compact_channel_name($channel));
+	$msg = Jcode->new($msg, 'jis')->euc;
+	&add_message($console, undef, $msg);
+    }
+}
+
+################################################################
+sub on_irc_part{
+    my ($kernel, $who, $channel) = @_[KERNEL, ARG0, ARG1];
+
+    $channel = unification_channel_name($channel);
+    $who =~ s/!.*//;
+
+    # chop off after the gap (bug workaround of POE::Filter::IRC)
+    $channel =~ s/ .*//;
+
+    if ($who eq $config->irc_nick) {
+	delete $channel_name{$channel};
+	delete $unread{$channel};
+	delete $mtime{$channel};
+	delete $topic{$channel};
+	delete $users_list{$channel};
+	delete $channel_buffer{$channel};
+	delete $channel_recent{$channel};
+    } else {
+	&remove_users_list($channel, $who);
+
+	my $msg = sprintf('- %s from %s', $who, &compact_channel_name($channel));
+	$msg = Jcode->new($msg, 'jis')->euc;
+	&add_message($console, undef, $msg);
+    }
+}
+
+################################################################
+sub on_irc_quit{
+    my ($kernel, $who, $msg) = @_[KERNEL, ARG0, ARG1];
+
+    $who =~ s/!.*//;
+
+    for my $channel (sort keys %channel_name) {
+	&remove_users_list($channel, $who);
+    }
+
+    $msg = Jcode->new($msg, 'jis')->euc;
+    &add_message($console, undef, "! $who ($msg)");
+}
+
+
+################################################################
+sub on_irc_public{
+    my ($kernel, $who, $channel, $msg) = @_[KERNEL, ARG0 .. ARG2];
+    $who =~ s/!.*//;
+    $channel = $channel->[0];
+    $msg = Jcode->new($msg, 'jis')->euc;
+    &add_message($channel, "$who>", $msg);
+}
+
+
+################################################################
+sub on_irc_notice{
+    my ($kernel, $who, $channel, $msg) = @_[KERNEL, ARG0 .. ARG2];
+    $who =~ s/!.*//;
+    $channel = $channel->[0];
+    $msg = Jcode->new($msg, 'jis')->euc;
+    &add_message($channel, "$who)", $msg);
+}
+
+
+################################################################
+sub on_irc_topic{
+    my ($kernel, $who, $channel, $topic) = @_[KERNEL, ARG0 .. ARG2];
+    $who =~ s/!.*//;
+    $topic = Jcode->new($topic, 'jis')->euc;
+    &add_message($channel, undef, "$who set topic: $topic");
+    add_topic($channel, $topic);
+}
+
+################################################################
+sub on_irc_topicraw{
+    my ($kernel, $raw) = @_[KERNEL, ARG1];
+    my ($channel, $topic) = split(/ :/, $raw, 2);
+    add_topic($channel, $topic);
+}
+
+################################################################
+sub on_irc_ctcp_action{
+    my ($kernel, $who, $channel, $msg) = @_[KERNEL, ARG0 .. ARG2];
+    $who =~ s/!.*//;
+    $channel = $channel->[0];
+    $msg = sprintf('* %s %s', $who, Jcode->new($msg, 'jis')->euc);
+    &add_message($channel, '', $msg);
+}
+
+################################################################
+sub on_irc_nick{
+    my ($kernel, $who, $nick) = @_[KERNEL, ARG0, ARG1];
+
+    $who =~ s/!.*//;
+    $nick =~ s/!.*//;
+
+    if ($who eq $config->irc_nick) {
+	$config->irc_nick($nick);
+    }
+
+    for my $channel (sort keys %channel_name) {
+	#$users_list{$channel} =~ s/\b$who\b/$nick/g
+	&rename_users_list($channel, $who, $nick);
+    }
+
+    &add_message($console, undef, "$who -> $nick");
+}
+
+################################################################
+sub on_irc_msg{
+    my ($kernel, $who, $channel, $msg) = @_[KERNEL, ARG0 .. ARG2];
+    $who =~ s/!.*//;
+    $channel = $channel->[0];
+    $msg = Jcode->new($msg, 'jis')->euc;
+    &add_message($channel, "$who>", $msg);
+}
+
+
+################################################################
+sub on_irc_rpl_namreply{
+    my ($kernel, $raw) = @_[KERNEL, ARG1];
+    my ($channel, $names) = split(/ :/, $raw, 2);
+
+    $users_list_work .= ' ' unless $users_list_work =~ / $/;
+    $users_list_work .= $names;
+}
+
+################################################################
+sub on_irc_rpl_endofnames{
+    my ($kernel, $raw) = @_[KERNEL, ARG1];
+    my ($channel, $names) = split(/ :/, $raw, 2);
+
+    $channel = unification_channel_name($channel);
+
+    $users_list_work =~ s/(?<!\S)[+@]/$1/g;
+
+    $users_list{$channel} = $users_list_work;
+    $users_list_work = '';
+}
+
+
+################################################################
+sub on_irc_disconnected{
+    my ($kernel, $server) = @_[KERNEL, ARG1];
+
+    my $who = Jcode->new($config->web_title, 'jis')->euc;
+
+    for my $channel (sort keys %channel_name) {
+	&add_message($channel, undef, "Disconnected Server : $server");
+    }
+
+    $disconnected = 1;
+}
+
+
+################################################################
+# $msg は EUC になっているはず
+# $channel は jis できてるぞ
+sub add_message{
+    my($channel, $who, $msg) = @_;
+    my $bChannel;
+
+    $bChannel = 0;
+    for my $clist (keys(%channel_name)) {
+	my $dst = lc($clist);
+	my $src = lc($channel);
+	if ($dst eq $src) {
+	    $channel = $clist;
+	    $bChannel = 1;
+	    last;
+	}
+    }
+
+    if (!$bChannel) {
+	$channel = $private;
+    }
+
+    $channel = unification_channel_name($channel);
+
+    # remove color change code
+    $msg =~ s/\x03(\d\d(,\d\d)?)?//g;
+    $msg =~ s/[\x0f\x02\x1f]//g;
+
+    my $message;
+    if (length $who) {
+	$message = sprintf('%s %s %s', &now, $who, $msg);
+    } else {
+	$message = sprintf('%s %s', &now, $msg);
+    }
+
+    my @tmp = split("\n", $channel_buffer{$channel});
+    push @tmp, $message;
+
+    my @tmp2 = split("\n", $channel_recent{$channel});
+    push @tmp2, $message;
+
+    # unread lines
+    $unread{$channel}++;
+
+    if ($unread{$channel} > $buf_lines) {
+	$unread{$channel} = $buf_lines;
+    }
+
+    if (@tmp > $buf_lines) {
+	$channel_buffer{$channel} =
+	    join("\n", splice(@tmp, -$buf_lines));
+    } else {
+	$channel_buffer{$channel} = join("\n", @tmp);
+    }
+
+    if (@tmp2 > $buf_lines) {
+	$channel_recent{$channel} =
+	    join("\n", splice(@tmp2, -$buf_lines));
+    } else {
+	$channel_recent{$channel} = join("\n", @tmp2);
+    }
+
+    if ($channel eq $console) {
+	$mtime{$channel} = 0;
+    } else {
+	$mtime{$channel} = time;
+    }
+}
+
+
+################################################################
+sub add_topic{
+    my($channel, $topic) = @_;
+
+    $channel = unification_channel_name($channel);
+
+    $topic{$channel} = $topic;
+}
+
+
+################################################################
+sub now{
+    my ($sec,$min,$hour) = localtime(time);
+    sprintf('%02d:%02d', $hour, $min);
+}
+
+################################################################
+sub escape{
+    local($_) = shift;
+    s/&/&amp;/g;
+    s/>/&gt;/g;
+    s/</&lt;/g;
+    s/\"/&quot;/g;
+    $_;
+}
+
+################################################################
+sub index_page{
+    my $buf;
+    my $accesskey = 1;
+
+    for my $channel (sort {
+	$mtime{$b} <=> $mtime{$a};
+    }(keys(%channel_name))) {
+
+	if ($accesskey < 10) {
+	    $buf .= sprintf('%1d <a accesskey="%1d" href="%s%s">%s</a>',
+			    $accesskey,
+			    $accesskey,
+			    $docroot,
+			    &channel_to_uri($channel),
+			    Jcode->new(&compact_channel_name($channel), 'jis')->euc);
+	} else {
+	    $buf .= sprintf('  <a href="%s%s">%s</a>',
+			    $docroot,
+			    &channel_to_uri($channel),
+			    Jcode->new(&compact_channel_name($channel), 'jis')->euc);
+	}
+
+	$accesskey++;
+
+	# 未読行数
+	if ($unread{$channel} > 0) {
+	    $buf .= sprintf(' <a href="%s%s,recent">%d</a>',
+			    $docroot,
+			    &channel_to_uri($channel),
+			    $unread{$channel});
+	}
+	$buf .= '<br>';
+    }
+
+    $buf .= qq(0 <a accesskey="0" href="$docroot">refresh</a><br>);
+    $buf .= qq(* <a accesskey="*" href="$docroot,recent">recent</a><br>);
+    if (%topic) {
+	$buf .= qq(# <a accesskey="#" href="$docroot,topics">topics</a><br>);
+    }
+
+    $buf .= qq(<a href="$docroot,reconnect">);
+    if (!$disconnected) {
+	$buf .= qq(force );
+    }
+    $buf .= qq(reconnect to server</a><br>);
+
+    $buf .= qq( - keitairc $version);
+    $buf;
+}
+
+#################################################################
+sub index_recent {
+    my $mobile = shift;
+    my $buf;
+    my $accesskey = 1;
+
+    $buf = '';
+
+    for my $channel (sort {
+	$mtime{$b} <=> $mtime{$a};
+    }(keys(%channel_name))) {
+	if ($unread{$channel} > 0) {
+	    $buf .= '<p>';
+	    $buf .= '<a ';
+	    if ($accesskey < 10) {
+		$buf .= sprintf('accesskey="%1d" ', $accesskey)
+	    }
+	    $buf .= sprintf('href="%s%s">%s',
+			    $docroot,
+			    &channel_to_uri($channel),
+			    Jcode->new(&compact_channel_name($channel), 'jis')->euc);
+	    if ($accesskey < 10) {
+		$buf .= sprintf(' [%1d]', $accesskey)
+	    }
+	    $buf .= '</a><br>';
+	    $buf .= '<font size="-1">' if ($mobile);
+	    $buf .= &render($channel_recent{$channel}, false);
+	    $buf .= '</font>' if ($mobile);
+	    $buf .= '</p>';
+
+	    $accesskey++;
+	}
+
+	# clear unread counter
+	$unread{$channel} = 0;
+
+	# clear recent messages buffer
+	$channel_recent{$channel} = '';
+    }
+
+    $buf .= qq(0 <a accesskey="0" href="$docroot,recent">refresh</a><br>);
+    $buf .= qq(# <a accesskey="#" href="$docroot,topics">topics</a><br>);
+    $buf .= qq(* <a accesskey="*" href="$docroot">back to list</a><br>);
+
+    return $buf;
+}
+
+
+#################################################################
+sub channel_topic {
+    my $channel = shift;
+    my $mobile = shift;
+    my $buf;
+
+    $buf = '';
+
+    $buf .= '<p>';
+    $buf .= sprintf('<a href="%s%s">%s</a><br>',
+		    $docroot,
+		    &channel_to_uri($channel),
+		    Jcode->new(&compact_channel_name($channel), 'jis')->euc);
+    $buf .= '<font size="-1">' if ($mobile);
+    $buf .= &escape(Jcode->new($topic{$channel}, 'jis')->euc);
+    $buf .= '<br>';
+
+    for my $user (sort split(' ', $users_list{$channel})) {
+	$buf .= $user;
+	$buf .= '<br>';
+    }
+
+    $buf .= '</font>' if ($mobile);
+    $buf .= '</p>';
+}
+
+#################################################################
+sub index_topic {
+    my $mobile = shift;
+    my $buf;
+
+    $buf = '';
+
+    for my $channel (sort keys %channel_name) {
+	$buf .= channel_topic($channel, $mobile);
+    }
+
+    $buf .= qq(0 <a accesskey="0" href="$docroot,topics">refresh</a><br>);
+    $buf .= qq(* <a accesskey="*" href="$docroot,recent">recent</a><br>);
+    $buf .= qq(<a accesskey="8" href="$docroot">back to list[8]</a><br>);
+
+    return $buf;
+}
+
+#################################################################
+sub index_users{
+    my $mobile = shift;
+    my $buf;
+
+    for my $channel (sort keys %users_list) {
+	$buf .= '<p>';
+	$buf .= sprintf('<a href="%s%s">%s</a><br>',
+			$docroot,
+			&channel_to_uri($channel),
+			Jcode->new(&compact_channel_name($channel), 'jis')->euc);
+	$buf .= '<font size="-1">' if ($mobile);
+
+	for my $user (sort split(' ', $users_list{$channel})) {
+	    $buf .= $user;
+	    $buf .= '<br>';
+	}
+	$buf .= '</p>';
+    }
+
+    return $buf;
+}
+
+#################################################################
+sub recent_all_messages{
+    my $recent_n = shift;
+    $recent_n = 10 unless $recent_n;
+    my $buf = '';
+    my @tmp = ();
+
+    for my $channel (keys %channel_name) {
+	my $link = sprintf('<a href="%s%s">%s</a>',
+			   $docroot,
+			   &channel_to_uri($channel),
+			   Jcode->new(compact_channel_name($channel), 'jis')->euc);
+	# for my $message ( split("\n", $channel_buffer{$channel}) ) {
+	for my $message ( split("\n", $channel_recent{$channel}) ) {
+	    push (@tmp, &line_render($message) . " ($link)<br>\n" );
+	}
+    }
+    my $current_n = 0;
+    for my $message (map { $_->[1] }
+			 sort { $b->[0] cmp $a->[0] }
+			     map { [substr($_,0,5), $_] } @tmp) {
+	$buf .= $message;
+	$current_n++;
+	last if $current_n > $recent_n;
+    }
+    return $buf;
+}
+
+################################################################
+# チャネル名称を短かくする
+sub compact_channel_name{
+    local($_) = shift;
+
+    if (defined $config->net_sep) {
+	my $suf = quotemeta($config->net_sep);
+	s/$suf[^$suf]*?($|:)/$1/o;
+    }
+
+    # #name:*.jp を %name に
+    if (s/:\*\.jp$//) {
+	s/^#/%/;
+    }
+
+    # 末尾の単独の @ は取る (for multicast.plm)
+    s/\@$//;
+
+    $_;
+}
+
+################################################################
+sub line_render {
+    my ($line) = @_;
+
+    local $_ = &escape($line);
+
+    unless (s,\b(https?://[!-;=?-~]+\b/*),<a href="${uri_prefix}$1">$1</a>,g) {
+	unless (s|\b(www\.[!-;=?-~]+\b/*)|<a href="${uri_prefix}http://$1">$1</a>|g) {
+	    # phone to
+	    unless (s|\b(0\d{1,3})([-(]?)(\d{2,4})([-)]?)(\d{4})\b|<a href="tel:$1$3$5">$1$2$3$4$5</a>|g) {
+		# ordinal-prefix: (null)~+-
+		# freenode-prefix: [ni]=
+		s|\b(?<!!)(?<!![~+-])(?<!![ni]=)(\w[\w.+=-]+\@[\w.-]+[\w]\.[\w]{2,4})\b|<a href="mailto:$1">$1</a>|g;
+	    }
+	}
+    }
+
+    s/\s+$//;
+    s/\s+/ /g;
+    return $_;
+}
+
+################################################################
+sub channel_render{
+    my($channel, $recent, $page) = @_;
+    my @buf;
+
+    my $lines = $config->web_lines;
+    my $recent_lines = 0;
+    if ($recent) {
+	$recent_lines = $unread{$channel};
+	$lines = $recent_lines + $always_show_lines;
+	if ($lines > $config->web_lines) {
+	    $lines = $config->web_lines;
+	}
+    }
+
+    #   my @src = (reverse(split("\n", shift)))[0 .. $config->web_lines];
+    my @src = (reverse(split("\n", $channel_buffer{$channel})))[$page * $lines ..
+								    ($page+1) * $lines-1];;
+    my $line = 0;
+
+    for (@src) {
+	next unless defined;
+	next unless length;
+
+	if ($recent && defined $always_show_lines && $line++ == $recent_lines) {
+	    push @buf, '<hr>';
+	}
+
+	$_ = line_render($_);
+	$_  .= '<br>';
+	push @buf, $_;
+    }
+
+    #    '<pre>' . join("\n", @buf) . '</pre>';
+
+    join("\n", @buf);
+}
+
+################################################################
+sub render{
+    my($message, $reverse, $page) = @_;
+    my @buf;
+
+    #   my @src = (reverse(split("\n", shift)))[0 .. $config->web_lines];
+    my @src = (reverse(split("\n", $message)))[$page * $config->web_lines ..
+						   ($page+1) * $config->web_lines-1];;
+    @src = reverse(@src) unless $reverse;
+
+    for (@src) {
+	next unless defined;
+	next unless length;
+
+	$_ = line_render($_);
+	$_  .= '<br>';
+	push @buf, $_;
+    }
+
+    #    '<pre>' . join("\n", @buf) . '</pre>';
+
+    join("\n", @buf);
+}
+
+################################################################
+sub on_web_request{
+    my ($kernel, $heap, $request) = @_[KERNEL, HEAP, ARG0];
+
+    # Filter::HTTPD sometimes generates HTTP::Response objects.
+    # They indicate (and contain the response for) errors that occur
+    # while parsing the client's HTTP request.  It's easiest to send
+    # the responses as they are and finish up.
+    if ($request->isa('HTTP::Response')) {
+	$heap->{client}->put($request);
+	$kernel->yield('shutdown');
+	return;
+    }
+
+    my $mobile;
+    $mobile = 0;
+    if ($request->user_agent =~ /(DoCoMo|UP\.Browser|J-PHONE)/) {
+	$mobile = 1;
+    }
+
+    if ($request->user_agent =~ /DDIPOCKET/) {
+	$mobile = 2;
+    }
+
+    # authorizations
+    while (1) {
+	#  use last to authorization pass
+
+	if ($config->use_cookie) {
+	    my %cookie;
+	    for (split(/; */, $request->header('Cookie'))) {
+		my ($name, $value) = split(/=/);
+		$value =~ s/%([0-9A-Fa-f][0-9A-Fa-f])/pack('C', hex($1))/eg;
+		$cookie{$name} = $value;
+	    }
+	    if ($cookie{username} eq $config->web_username &&
+		    $cookie{passwd} eq $config->web_password) {
+		last;
+	    }
+	}
+
+	if (defined($config->au_subscriber_id) &&
+		$request->header('x-up-subno') eq $config->au_subscriber_id) {
+	    last;
+	}
+
+	if (defined($authorized_useragent) &&
+		$request->header('user-agent') =~ /^\Q$authorized_useragent\E/o) {
+	    last;
+	}
+
+	if (defined($config->web_username) &&
+		$request->headers->authorization_basic eq
+		    $config->web_username . ':' . $config->web_password) {
+	    last;
+	}
+
+	my $response = HTTP::Response->new(401);
+	$response->push_header(WWW_Authenticate => qq(Basic realm="keitairc"));
+	$heap->{client}->put($response);
+	$kernel->yield('shutdown');
+	return;
+    }
+
+    my $uri = $request->uri;
+    my $content = '';
+    $content .= '<html><head>';
+    #   $content .= '<meta http-equiv="Cache-Control" content="no-cache" />';
+    $content .= '<meta http-equiv="Cache-Control" content="max-age=0" />';
+
+    # store and remove attached options from uri
+    my %option;
+    while ($uri =~ s/,(.+?)(=.*)?$//) {
+	if (defined $2) {
+	    $option{$1} = $2;
+	    $option{$1} =~ s/^=//;
+	} else {
+	    $option{$1} = $1;
+	}
+    }
+
+    $uri =~ s|^/||;
+
+    # POST されてきたものは発言
+    if ($request->method =~ /POST/i) {
+	my $message = $request->content;
+	$message =~ s/^m=//;
+	$message =~ s/\+/ /g;
+	$message = uri_unescape($message);
+
+	if (length($message)) {
+	    my $channel = &uri_to_channel($uri);
+	    if ($message =~ s|^/||) {
+		my ($params, $trailing) = split(/ :/, $message, 2);
+		my @postcmd = split(/ /, $params);
+		push @postcmd, $trailing if defined $trailing;
+
+		$poe_kernel->post('keitairc', map {
+		    Jcode->new($_, $config->web_input_encoding)->jis
+		} @postcmd);
+	    } else {
+		$poe_kernel->post('keitairc',
+				  'privmsg',
+				  Jcode->new($channel, $config->web_input_encoding)->jis,
+				  Jcode->new($message, $config->web_input_encoding)->jis);
+		&add_message($channel, $config->irc_nick . '>',
+			     Jcode->new($message, $config->web_input_encoding)->euc);
+		$message_added = true;
+	    }
+	}
+    }
+
+    my $page = $option{p} || 0;
+
+    if ($uri eq '') {
+	$content .= '<title>' . $config->web_title . '</title>';
+	$content .= '</head>';
+	$content .= '<body>';
+
+	if ($option{recent}) {
+	    $content .= &index_recent($mobile);
+	} elsif ($option{topics}) {
+	    $content .= &index_topic($mobile);
+	} elsif ($option{users}) {
+	    $content .= &index_users($mobile);
+	} elsif ($option{reconnect}) {
+	    $poe_kernel->post('keitairc' => 'connect' => {});
+	    $content .= 'reconnecting...<br>';
+	    $content .= &index_page;
+	} else {
+	    $content .= &index_page;
+	}
+    } else {
+	# RFC 2811:
+	# Apart from the the requirement that the first character
+	# being either '&', '#', '+' or '!' (hereafter called "channel
+	# prefix"). The only restriction on a channel name is that it
+	# SHALL NOT contain any spaces (' '), a control G (^G or ASCII
+	# 7), a comma (',' which is used as a list item separator by
+	# the protocol).  Also, a colon (':') is used as a delimiter
+	# for the channel mask.  The exact syntax of a channel name is
+	# defined in "IRC Server Protocol" [IRC-SERVER].
+	#
+	# so we use white space as separator character of channel name
+	# and command argument.
+
+	my $channel = uri_to_channel($uri);
+
+	$content .= '<title>' . $config->web_title . ": " .
+	    Jcode->new($channel, 'jis')->euc . "</title>";
+	$content .= '</head>';
+	$content .= '<body>';
+
+	if ($option{topic}) {
+	    if (defined($channel_name{$channel})) {
+		$content .= channel_topic($channel, $mobile);
+		$content .= sprintf('<a accesskey="5" href="%s%s">back[5]</a>,',
+				    "$docroot", &channel_to_uri($channel));
+		$content .= qq(<a accesskey="8" href="$docroot">list[8]</a>);
+	    } else {
+		$content .= "no such channel";
+	    }
+	} else {
+	    my $show_recent = $option{recent};
+	    if (!$show_recent && $show_newmsgonly) {
+		if ($message_added) {
+		    $show_recent = 1;
+		} elsif (($show_newmsgonly == 2) &&
+			     ($request->method =~ /POST/i)) {
+		    $show_recent = 1;
+		}
+	    }
+
+	    $content .= '<a name="1"></a>';
+	    $content .= '<a accesskey="7" href="#1"></a>';
+
+	    $content .= sprintf('<form action="%s%s" method="post">',
+				$docroot, &channel_to_uri($channel));
+
+	    my @tmp = split("\n", $channel_buffer{$channel});
+	    my ($goback, $goforward) = ('', '');
+	    my $channel_uri = channel_to_uri($channel);
+	    if (0 < $page) {
+		my $pp = $page - 1;
+		$goback .= qq(<a accesskey="4" href="${docroot}${channel_uri},p=${pp}">[4]<=</a>);
+	    }
+	    if (($page+1) * $config->web_lines < @tmp) {
+		my $pp = $page + 1;
+		$goforward .= qq(<a accesskey="6" href="${docroot}${channel_uri},p=${pp}">=>[6]</a>);
+	    }
+
+	    if ($mobile) {
+		$content .= sprintf('<input type="text" name="m" size="%d">' ,
+				   ( $mobile == 1 ? 22 : 15 ));
+		$content .= '<input accesskey="1" type="submit" value="OK[1]"><br>';
+		if ($goback ne '' or $goforward ne '') {
+		    $content .= ' '. $goback . '('.$page.')'. $goforward . ' ';
+		}
+		$content .= qq(<a accesskey="8" href="$docroot">Ch[8]</a>);
+	    } else {
+		$content .= '<input type="text" name="m" size="64">';
+		$content .= '<input accesskey="1" type="submit" value="OK[1]"><br>';
+		if ($goback ne '' or $goforward ne '') {
+		    $content .= ' '. $goback . '('.$page.')'. $goforward . ' ';
+		}
+		$content .= qq(<a accesskey="8" href="$docroot">list[8]</a>);
+	    }
+	    $content .= sprintf(',<a href="%s%s,topic">topic</a>',
+				$docroot, $channel_uri);
+	    if ($show_newmsgonly == 2) {
+		if ($page != 0) {
+		    $content .= sprintf(',<a accesskey="5" href="%s%s">latest[5]</a>',
+					$docroot, $channel_uri);
+		} elsif (!$show_recent) {
+		    $content .= sprintf(',<a accesskey="5" href="%s%s">refresh[5]</a>',
+					$docroot, $channel_uri);
+		}
+	    }
+	    $content .= '<br></form>';
+
+	    $content .= '<font size ="-1">' if ($mobile);
+
+	    if (defined($channel_name{$channel})) {
+		if (defined($channel_buffer{$channel}) && length($channel_buffer{$channel})) {
+		    $content .= '<a accesskey="9" href="#2"></a>';
+		    if ($show_recent) {
+			$content .= &channel_render($channel, true);
+			$content .= sprintf('<a accesskey="5" href="%s%s">...more[5]</a>',
+					    $docroot, $channel_uri);
+		    } else {
+			$content .= &channel_render($channel, false, $page);
+		    }
+		    $content .= '<a name="2"></a>';
+		} else {
+		    $content .= 'no message here yet';
+		}
+	    } else {
+		$content .= "no such channel";
+	    }
+
+	    if ($page == 0) {
+		# clear check flags
+		$message_added = false;
+
+		# clear unread counter
+		$unread{$channel} = 0;
+
+		# clear recent messages buffer
+		$channel_recent{$channel} = '';
+	    }
+
+	    # add recent messages in all channels
+	    if (!defined $option{update} && $web_common_lines) {
+		$content .= '<hr>';
+		$content .= recent_all_messages($web_common_lines);
+	    }
+
+	    # mobile mode end
+	    $content .= '</font>' if ($mobile);
+	}
+
+	# add channel list link
+	$content .= '<hr>';
+	$content .= qq(* <a accesskey="*" href="$docroot,recent">recent</a><br>);
+	$content .= qq(# <a accesskey="#" href="$docroot,topics">topics</a><br>);
+	$content .= qq(<a href="$docroot">Channel List</a><br>);
+    }
+
+    $content .= '</body></html>';
+
+    my $response = HTTP::Response->new(200);
+
+    if ($config->use_cookie) {
+	my ($sec, $min, $hour, $mday, $mon, $year, $wday) =
+	    localtime(time + cookie_ttl);
+	my $expiration =
+	    sprintf('%.3s, %.2d-%.3s-%.4s %.2d:%.2d:%.2d',
+		    qw(Sun Mon Tue Wed Thu Fri Sat)[$wday],
+		    $mday,
+		    qw(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec)[$mon],
+		    $year + 1900,
+		    $hour,
+		    $min,
+		    $sec);
+	$response->push_header('Set-Cookie',
+			       sprintf("username=%s; expires=%s; \n",
+				       $config->web_username, $expiration));
+	$response->push_header('Set-Cookie',
+			       sprintf("passwd=%s; expires=%s; \n",
+				       $config->web_password, $expiration));
+    }
+
+    $response->push_header('Content-type', 'text/html; charset=Shift_JIS');
+    if (defined $config->accesskey_attrs) {
+	my @accesskeys = split /,/, $config->accesskey_attrs;
+	$content =~ s/(<(?:a|input) +)accesskey(=[^ >]+)/
+	    "$1" . join(' ', map { "$_$2" } @accesskeys)/eg;
+    }
+    $response->content(Jcode->new($content, 'euc')->sjis);
+    $heap->{client}->put($response);
+    $kernel->yield('shutdown');
+}
+
+sub uri_to_channel {
+    my ($str) = shift;
+
+    return Jcode->new(uri_unescape($str), 'utf8')->jis;
+}
+
+sub channel_to_uri {
+    my ($str) = shift;
+
+    $str = uri_escape(Jcode->new($str, 'jis')->utf8);
+}
+
+sub unification_channel_name {
+    my ($channel) = shift;
+
+    for my $clist (keys(%channel_name)) {
+	my $dst = lc($clist);
+	my $src = lc($channel);
+	if ($dst eq $src) {
+	    $channel = $clist;
+	    last;
+	}
+    }
+
+    return $channel;
+}
+
+sub add_users_list {
+    my ($channel, $who) = @_;
+
+    $channel = unification_channel_name($channel);
+
+    my @org = split(" ", $users_list{$channel});
+    $org[$#org + 1] = $who;
+
+    $users_list{$channel} = join(" ", @org);
+}
+
+sub remove_users_list {
+    my ($channel, $who) = @_;
+
+    $channel = unification_channel_name($channel);
+
+    my @org = split(" ", $users_list{$channel});
+    my @new = ();
+    for (my $i = 0; $i <= $#org; $i++) {
+	my $name = $org[$i];
+	if ($name ne $who) {
+	    push(@new, $org[$i]);
+	}
+    }
+    $users_list{$channel} = join(" ", @new);
+}
+
+sub rename_users_list {
+    my ($channel, $who, $nick) = @_;
+
+    $channel = unification_channel_name($channel);
+
+    my @org = split(" ", $users_list{$channel});
+
+    for (my $i = 0; $i < $#org; $i++) {
+	my $name = $org[$i];
+	if ($name eq $who) {
+	    $org[$i] = $nick;
+	}
+    }
+
+    $users_list{$channel} = join(" ", @org);
+}
+
+
+sub require_charset_converter {
+    if (eval('use Unicode::Japanese;')) {
+	eval <<'END_OF_JCODE_COMPAT';
+	# Jcode compat
+	package Jcode;
+	use Unicode::Japanese;
+	our $AUTOLOAD;
+
+	sub new {
+	    my ($class, $str, $input_code) = @_;
+
+	    $input_code = "auto" if !defined $input_code;
+	    my $this = {
+		unijp => Unicode::Japanese->new(),
+	    };
+	    bless $this, $class;
+
+	    if ($input_code !~ /,/) {
+		$this->set($str, $input_code);
+	    } else {
+		my @encodings = split(/\s*,\s*/, $input_code);
+		my $auto_charset = $this->getcode($str);
+		# getcodeで検出された文字コードでencodingsに指定されているものがあれば採用。
+		# 無ければencodingsの一番最初を採用する。 (UTF-8をSJISと認識したりするため。)
+		my $use_encoding = ((map {$auto_charset eq $_ ? $_ : ()} @encodings), @encodings)[0];
+		$this->set($str, $use_encoding);
+	    }
+
+	    return $this;
+	}
+
+	sub AUTOLOAD {
+	    my ($this, @args) = @_;
+
+	    if ($AUTOLOAD =~ /::DESTROY$/) {
+		# DESTROYは伝達させない。
+		return;
+	    }
+
+	    (my $method = $AUTOLOAD) =~ s/.+?:://g;
+
+	    # define method
+	    eval "sub $method { shift->{unijp}->$method(\@_); }";
+
+	    no strict "refs";
+	    goto &$AUTOLOAD;
+	}
+END_OF_JCODE_COMPAT
+    } else {
+	if (eval('use Jcode;')) {
+	    die "Couldn't load Unicode::Japanese or Jcode!";
+	}
+    }
+}
+
+__END__

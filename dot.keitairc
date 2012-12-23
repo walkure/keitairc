@@ -1,0 +1,87 @@
+# sample ~/.keitairc
+# $Id: dot.keitairc,v 1.3 2004/07/30 09:39:21 ishikawa Exp $
+
+################################################################
+# irc connection
+################################################################
+
+# nick
+irc_nick = adr
+
+# username
+irc_username = andre
+
+# your name
+irc_desc = Andre Limmoenman
+
+# irc server, port and password (if any)
+irc_server = irc.example.com
+irc_port = 6667
+irc_password = javel
+
+
+################################################################
+# web (i-mode) connection
+################################################################
+
+# listening port
+web_port = 1234
+
+# page title
+web_title = keitairc
+
+# page lines per irc channel
+web_lines = 20
+
+# buffer lines per irc channel
+buf_lines = 100
+
+# common (all channel's recent) lines
+web_common_lines = 10
+
+# authorization: username & password
+web_username = andre
+web_password = 2055
+
+################################################################
+# options for au (ezweb)
+################################################################
+# au_subscriber_id = 050999999999999_mb.ezweb.ne.jp
+
+# options for other blowser phones sending unique id on user-agent
+# (such as j-sky, user-agent string starts with this prefix)
+# authorized_useragent = J-PHONE/4.2/V601SH/SNJSHHXXXXXX SH/0004aa
+
+################################################################
+# some options
+################################################################
+
+# only unread messages will be shown after speking
+#show_newmsgonly = yes
+# only unread messages will be shown after always post(click ok button)
+#show_newmsgonly = always
+#  and always show already read 5 lines
+#show_newmsgonly = always,5
+
+# if web_input_encoding is defined, web input is always decoded
+#with specified encoding
+# if server_charset is not jis , define this value(e.g utf8)
+#web_input_encoding = sjis
+#server_charset = jis
+
+
+# if uri_prefix is defined, URI(http) auto link has specified prefix
+#uri_prefix = http://www.clovery.jp/redirect/
+
+# if net_sep is defined, remove network suffix from channel name.
+#net_sep = @
+
+# to use keitairc behind httpd proxy, maybe you want to specify
+# path from root.
+#web_root = /keitairc/
+
+# use j-sky
+#accesskey_attrs = accesskey,directkey
+
+#proxy root
+#proxy_root=/irc

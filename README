@@ -1,0 +1,19 @@
+keitairc 
+
+*about
+an fork of keitairc keitairc_topia-1.29+y9+t12
+http://www.clovery.jp/dist/net/keitairc/
+
+
+*features
+-use Encode.pm instead of Jcode.pm
+-support utf-8(and so on) servers/irc channels.
+-support tig-perl-stream( https://github.com/walkure/tig-perl-stream )
+-support access via reverse proxy(rewriting urls)
+
+*license
+-This program is covered by the GNU General Public License 2
+(inherited from original code.)
+
+*Copyright of Changes
+(c) 2012 walkure <walkure at 3pf.jp>

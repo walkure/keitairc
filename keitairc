@@ -38,7 +38,7 @@ my ($version) = $rcsid =~ m#,v ([0-9.]+)#;
 # yukinon version
 $version .= "+y9";
 $version .= "+t12";
-$version .= '+w2';
+$version .= '+w3';
 
 use strict;
 use POE;
@@ -48,6 +48,8 @@ use POE::Component::IRC;
 use URI::Escape;
 use HTTP::Response;
 use AppConfig qw(:argcount);
+use Math::Int2Base qw(base2int);
+
 
 use constant true => 1;
 use constant false => 0;
@@ -697,8 +699,25 @@ sub compact_channel_name{
 }
 
 ################################################################
+sub get_original_tweet
+{
+	my $msg = shift;
+	
+	my $a1 = index($msg,'>');
+	return $msg if $a1 < 0;
+	
+	my $a2 = index($msg,'>',$a1+1);
+	return $msg if $a2 < 0;
+	
+	substr($msg, $a2 +2 , length($msg) - $a2 -2);
+
+}
+
 sub line_render {
-    my ($line) = @_;
+    my ($line,$page,$channel_url) = @_;
+    
+    my $org_line = get_original_tweet($line);
+    $org_line =~ s/(.)/unpack('H2', $1)/eg;
     
 	$line = &escape($line);
 	
@@ -713,6 +732,22 @@ sub line_render {
 		}
     }
     
+    if($line =~ /&lt;.+\((\S+)\)\:(\S+)&gt;/){
+		my ($id,$key)=($1,$2);
+		{
+			use bigint;
+			my $uid;
+			$line .= qq( <a href="http://twtr.jp/user/$id/status/$uid">p</a>)
+				if(eval('$uid = base2int($key,62);'));
+		}
+		$line .= qq(<a href="$docroot$channel_url,m=r,p=$page,key=$key,id=$id">Re</a>);
+		$line .= qq(<a href="$docroot$channel_url,m=f,p=$page,key=$key,id=$id">F</a>);
+		$line .= qq(<a href="$docroot$channel_url,m=t,p=$page,key=$key,id=$id">Rt</a>);
+		$line .= qq(<a href="$docroot$channel_url,m=d,p=$page,key=$key,id=$id">D</a>);
+#		$line .= qq(<a href="$docroot$channel_url,m=q,p=$page,msg=$org_line">Q</a>);
+	}
+
+
     $line =~ s/\s+$//;
     $line =~ s/\s+/ /g;
     return $line;
@@ -720,7 +755,7 @@ sub line_render {
 
 ################################################################
 sub channel_render{
-    my($channel, $recent, $page) = @_;
+    my($channel, $recent, $page,$channel_url) = @_;
     my @buf;
 
     my $lines = $config->web_lines;
@@ -746,7 +781,7 @@ sub channel_render{
 		    push @buf, '<hr>';
 		}
 
-		$_ = line_render($_);
+		$_ = line_render($_,$page,$channel_url);
 		$_  .= '<br>';
 		push @buf, $_;
     }
@@ -983,16 +1018,31 @@ sub on_web_request{
 				$goforward .= qq(<a accesskey="6" href="${docroot}${channel_uri},p=${pp}">=>[6]</a>);
 		    }
 
+	    	my $value = '';
+    		if(defined $option{m}){
+    			if($option{m} eq 'f'){
+    				$value = '*'.$option{key};
+    			}elsif($option{m} eq 'd'){
+    				$value = '$'.$option{key};
+    			}elsif($option{m} eq 't'){
+    				$value = '@'.$option{key};
+    			}elsif($option{m} eq 'r'){
+		    		$value = '>'.$option{key}.' @'.$option{id}.' ';
+    			}elsif($option{m} eq 'q'){
+		    		$value = $option{msg};
+		    		$value =~ s/([0-9A-Fa-f][0-9A-Fa-f])/pack('H2', $1)/eg;
+    			}
+	    	}
 		    if ($mobile) {
-				$content .= sprintf('<input type="text" name="m" size="%d">' ,
-						   ( $mobile == 1 ? 22 : 15 ));
+				$content .= sprintf('<input type="text" name="m" size="%d" value="%s">' ,
+						   ( $mobile == 1 ? 22 : 15 ) , $value);
 				$content .= '<input accesskey="1" type="submit" value="OK[1]"><br>';
 				if ($goback ne '' or $goforward ne '') {
 				    $content .= ' '. $goback . '('.$page.')'. $goforward . ' ';
 				}
 				$content .= qq(<a accesskey="8" href="$docroot">Ch[8]</a>);
 		    } else {
-				$content .= '<input type="text" name="m" size="64">';
+				$content .= '<input type="text" name="m" size="64" value="'.$value.'">';
 				$content .= '<input accesskey="1" type="submit" value="OK[1]"><br>';
 				if ($goback ne '' or $goforward ne '') {
 				    $content .= ' '. $goback . '('.$page.')'. $goforward . ' ';
@@ -1022,7 +1072,7 @@ sub on_web_request{
 						$content .= sprintf('<a accesskey="5" href="%s%s">...more[5]</a>',
 								$docroot, $channel_uri);
 					} else {
-						$content .= &channel_render($channel, false,$page);
+						$content .= &channel_render($channel, false,$page,$channel_uri);
 					}
 					$content .= '<a name="2"></a>';
 				} else {
